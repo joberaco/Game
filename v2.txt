@@ -1,0 +1,610 @@
+#include <stdio.h>
+#include <stdbool.h>
+#include <math.h>
+#include "SDL2/SDL.h" 
+#include "SDL2/SDL_image.h"
+#include "SDL2/SDL_ttf.h"
+#include "SDL2/SDL_mixer.h"
+
+#define SCREEN_WIDTH 640
+#define SCREEN_HEIGHT 480
+
+#define DELAY_MS 2000
+
+#define SHEET_PATH "imgs/sheet.png"
+#define FONT_PATH "fonts/pac.ttf"
+#define WAKA_PATH "sounds/waka.wav"
+
+#define SHEET_INITIAL_POS_X 76
+#define SHEET_INITIAL_POS_Y 14
+#define SHEET_STANDARD_SPRITE_SIZE 194
+
+#define OUTER_BOX_COLLIDER 1
+
+#define PAC_SPEED 10
+
+typedef struct{
+    SDL_Texture *texture;
+    const char *filename;
+	int w;
+	int h;
+} Texture;
+
+typedef struct{
+    SDL_Rect renderRect;
+	SDL_Rect boxCollider;
+	SDL_Rect *pixelColliders;
+	Texture *sheet;
+	SDL_Point *center;
+	SDL_RendererFlip flip;
+	int x, y;
+	int velX, velY;
+	double angle;
+} Sprite;
+
+typedef struct{
+	Sprite *animationSprites;
+	Sprite currentAnimationSprite;
+	int nAnimationSprites;
+	Texture *sheet;
+	int frame;
+	SDL_Point *center;
+	SDL_RendererFlip flip;
+	int x, y;
+	int velX, velY;
+	double angle;
+} AnimatedSprite;
+
+enum PacPositionsEnum
+{
+	PAC_CLOSED,
+	PAC_HALF_OPENED,
+	PAC_OPENED,
+	N_PAC_POSITIONS
+};
+
+enum GhostPositionsEnum
+{
+	GHOST_DEFAULT,
+	N_GHOST_POSITIONS
+};
+
+enum GhostFamilyEnum
+{
+	BLINKY,
+	N_GHOSTS
+};
+
+bool init();
+bool loadMedia();
+void close();
+
+SDL_Surface* loadSurface(const char* path);
+Texture loadTexture(const char* path, SDL_Color* colorKey);
+Texture loadRenderedText(const char* text, SDL_Color color, TTF_Font* font);
+void render(Texture texture, int x, int y, SDL_Rect* clip, double angle, SDL_Point* center, SDL_RendererFlip flip);
+bool checkCollision(SDL_Rect a, SDL_Rect b);
+
+Sprite loadSprite(Texture* sheet, SDL_Rect sheetClip, int x, int y, double angle, SDL_Point* center, SDL_RendererFlip flip);
+AnimatedSprite loadAnimatedSprite(int nAnimationSprites, Texture* sheet, SDL_Rect* sheetClips, int x, int y, double angle, SDL_Point* center, SDL_RendererFlip flip);
+void move(Sprite* sprite, Sprite* spritesColliding, int nSpritesColliding);
+void animate(AnimatedSprite* sprite);
+void renderSprite(Sprite sprite);
+void renderAnimatedSprite(AnimatedSprite sprite);
+void freeSprite(Sprite* sprite);
+
+void hanndlePacInput();
+void randomizeGhostsVelocity();
+
+void setPacSprite();
+
+void print_err(const char* msg);
+
+SDL_Window *window = NULL;
+SDL_Renderer *renderer = NULL;
+Texture sheet, title;
+AnimatedSprite pac;
+AnimatedSprite ghosts[N_GHOSTS];
+Sprite *windowColliders;
+TTF_Font *pacFont = NULL;
+Mix_Chunk *waka = NULL;
+
+int main(int argc, char** argv)
+{
+	bool quit = false;
+	SDL_Event event;
+	int gframe = 0;
+	int fps = 0;
+	Uint32 stime = 0, time = 0;
+
+	if(!init()){
+		printf("Could not initialize!\n");
+	}
+	else{
+		if(!loadMedia()){
+			printf("Could not load media");
+		}
+		else
+		{
+			stime = SDL_GetTicks();
+
+			while(!quit)
+			{
+				while(SDL_PollEvent(&event) != 0)
+				{
+					switch(event.type)
+					{
+					case SDL_QUIT:
+						quit = true;
+						break;
+					default:
+						break;
+					}
+				}
+
+				hanndlePacInput();
+				randomizeGhostsVelocity();
+
+				SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+				SDL_RenderClear(renderer);
+
+				if(Mix_Playing(-1) == 0){
+					Mix_PlayChannel(-1, waka, 0);
+				}
+
+				move(&pac, ghosts, N_GHOSTS);
+				animate(&pac);
+
+				Sprite pacs[1];
+				pacs[0] = pac.currentAnimationSprite;
+
+				move(&ghosts[BLINKY], pacs, 1);
+
+				pac.frame++;
+				gframe++;
+
+				time = (SDL_GetTicks() - stime) / 1000;
+				if(time > 0)
+					fps = gframe / time;
+
+				printf("animation frame = %i, elapsed time = %i, frames = %i, fps = %i, ticks = %i\n", pac.frame, time, gframe, fps, SDL_GetTicks());
+
+				render(title, 0, 0, NULL, 0, NULL, SDL_FLIP_NONE);
+				renderAnimatedSprite(ghosts[BLINKY]);
+				renderAnimatedSprite(pac);
+
+				SDL_RenderPresent(renderer);
+			}
+		}
+	}
+
+	close();
+	return 0;   
+}
+
+/*INIT SDL*/
+bool init()
+{
+	int imgFlags;
+
+	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0){
+		print_err("Could not initialize SDL");
+	}
+	else{
+		window = SDL_CreateWindow("Mein Window", 300, 300, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+
+		if(window == NULL){
+			print_err("Could not create window");
+			return false;
+		}
+		else{
+			renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+
+			if(renderer == NULL){
+				print_err("Could not create renderer");
+				return false;
+			}
+			else{
+				imgFlags = IMG_INIT_PNG;
+			
+				if(!(IMG_Init(imgFlags) & imgFlags)){
+					print_err("Could not initialize SDL_image");
+					return false;
+				}
+
+				if(TTF_Init() == -1){
+					print_err("Could not initialize SDL_ttf");
+					return false;
+				}
+
+				if(Mix_OpenAudio(MIX_DEFAULT_FREQUENCY, MIX_DEFAULT_FORMAT, MIX_DEFAULT_CHANNELS, 2048) < 0){
+					print_err("Could not initialize SDL_mixer");
+					return false;
+				}
+			}
+		}
+	}
+
+	return true;
+}
+
+bool loadMedia()
+{
+	SDL_Color black = {0, 0, 0, 0};
+	SDL_Color yellow = {255, 255, 0, 0};
+
+	sheet = loadTexture(SHEET_PATH, &black);
+
+	if(sheet.texture == NULL){
+		return false;
+	}
+	else{
+		//PAC SPRITE
+		
+
+		//RED GHOST SPRITE
+		ghosts[BLINKY] = loadSprite(N_GHOST_POSITIONS, &sheet, SCREEN_WIDTH/2, SCREEN_HEIGHT/2, 0, NULL, SDL_FLIP_NONE);
+
+		x += 211;
+		y -= 14;
+		ghosts[BLINKY].renderRects[GHOST_DEFAULT] = {x, y, SHEET_STANDARD_SPRITE_SIZE + 18, SHEET_STANDARD_SPRITE_SIZE + 14};
+
+		ghosts[BLINKY].collider = {SCREEN_WIDTH/2, SCREEN_HEIGHT/2, ghosts[BLINKY].renderRects[GHOST_DEFAULT].w, ghosts[BLINKY].renderRects[GHOST_DEFAULT].w};
+		ghosts[BLINKY].velX = PAC_SPEED;
+	}
+
+	pacFont = TTF_OpenFont(FONT_PATH, 48);
+
+	if(pacFont == NULL){
+		return false;
+	}
+	else{
+		title = loadRenderedText("pac-man", yellow, pacFont);
+
+		if(title.texture == NULL){
+			return false;
+		}
+	}
+
+	waka = Mix_LoadWAV(WAKA_PATH);
+
+	if(waka == NULL){
+		return false;
+	}
+
+	return true;
+}
+
+/*CLOSE & EXIT SDL AND SUBSYSTEMS*/
+void close()
+{
+	SDL_DestroyTexture(sheet.texture);
+	sheet.texture = NULL;
+
+	SDL_DestroyTexture(title.texture);
+	title.texture = NULL;
+
+	SDL_DestroyRenderer(renderer);
+	renderer = NULL;
+
+	Mix_FreeChunk(waka);
+	waka = NULL;
+
+	SDL_DestroyWindow(window);
+	window = NULL;
+
+	freeSprite(&pac);
+	freeSprite(&ghosts[BLINKY]);
+
+	IMG_Quit();
+	TTF_Quit();
+	Mix_Quit();
+	SDL_Quit();
+}
+
+/*LOAD SDL SURFACE FROM PATH*/
+SDL_Surface* loadSurface(const char* path)
+{
+	SDL_Surface *surface = IMG_Load(path);
+
+	if(surface == NULL){
+		print_err("Could not load surface");
+	}
+
+	return surface;
+}
+
+/*LOAD SDL TEXTURE FROM PATH AND COLOR KEY IF NECESSARY*/
+Texture loadTexture(const char* path, SDL_Color* colorKey)
+{
+	SDL_Texture *loadedTexture = NULL;
+	SDL_Surface *loadedSurface = loadSurface(path);
+	Texture texture;
+
+	if(loadedSurface == NULL){
+		print_err("Could not load surface for texture");
+	}
+	else
+	{
+		if(colorKey != NULL){
+			SDL_SetColorKey(loadedSurface, SDL_TRUE, SDL_MapRGB(loadedSurface->format, colorKey->r, colorKey->g, colorKey->b));
+		}
+
+		loadedTexture = SDL_CreateTextureFromSurface(renderer, loadedSurface);
+
+		if(loadedTexture == NULL){
+			print_err("Unable to load texture from surface");
+		}
+		else{
+			texture = {loadedTexture, path, loadedSurface->w, loadedSurface->h};
+		}
+
+		SDL_FreeSurface(loadedSurface);
+	}
+
+	return texture;
+}
+
+/*LOAD SDL TTF TEXTURE WITH GIVEN TEXT, COLOR AND FONT*/
+Texture loadRenderedText(const char *text, SDL_Color color, TTF_Font* font)
+{
+	SDL_Texture *loadedTTFTexture = NULL;
+	SDL_Surface *loadedTTFSurface = NULL;
+	Texture ttfText;
+
+	loadedTTFSurface = TTF_RenderText_Solid(font, text, color);
+
+	if(loadedTTFSurface == NULL){
+		print_err("Could not load TTF surface");
+	}
+	else
+	{
+		loadedTTFTexture = SDL_CreateTextureFromSurface(renderer, loadedTTFSurface);
+
+		if(loadedTTFTexture == NULL){
+			print_err("Unable to load TTF texture from surface");
+		}
+		else{
+			ttfText = {loadedTTFTexture, "", loadedTTFSurface->w, loadedTTFSurface->h};
+		}
+
+		SDL_FreeSurface(loadedTTFSurface);
+	}
+
+	return ttfText;
+}
+
+/*RENDER TEXTURE AND CLIP FROM IT IF NECESSARY*/
+void render(Texture texture, int x, int y, SDL_Rect* clip, double angle, SDL_Point* center, SDL_RendererFlip flip)
+{
+	SDL_Rect renderSpace = {x, y, texture.w, texture.h};
+
+	if(clip != NULL){
+		renderSpace.w = clip->w;
+		renderSpace.h = clip->h;
+	}
+
+	SDL_RenderCopyEx(renderer, texture.texture, clip, &renderSpace, angle, center, flip);
+}
+
+/*RENDER SPRITE*/
+void renderSprite(Sprite sprite)
+{
+	render(*sprite.sheet, sprite.x, sprite.y, &sprite.renderRect, sprite.angle, sprite.center, sprite.flip);
+}
+
+/*RENDER ANIMATED SPRITE*/
+void renderAnimatedSprite(AnimatedSprite sprite)
+{
+	renderSprite(sprite.currentAnimationSprite);
+}
+
+/*LOAD NEW SPRITE AND SET RENDER RECT BASED ON SOURCE SHEET*/
+Sprite loadSprite(Texture* sheet, SDL_Rect sheetClip, int x, int y, double angle, SDL_Point* center, SDL_RendererFlip flip)
+{
+	Sprite sprite;
+
+	sprite.sheet = sheet;
+	sprite.renderRect = sheetClip;
+	sprite.boxCollider = sprite.renderRect;
+	
+	sprite.x = x;
+	sprite.y = y;
+	sprite.velX = 0;
+	sprite.velY = 0;
+
+	sprite.angle = angle;
+	sprite.center = center;
+	sprite.flip = flip;
+
+	sprite.pixelColliders = NULL;
+
+	return sprite;
+}
+
+/*LOAD NEW ANIMATION SPRITE*/
+AnimatedSprite loadAnimatedSprite(int nAnimationSprites, Texture* sheet, SDL_Rect* sheetClips, int x, int y, double angle, SDL_Point* center, SDL_RendererFlip flip)
+{
+	AnimatedSprite animatedSprite;
+	int i;
+
+	animatedSprite.nAnimationSprites = nAnimationSprites;
+	animatedSprite.sheet = sheet;
+	
+	//SET ANIMATION SPRITES
+	if(nAnimationSprites > 0){
+		animatedSprite.animationSprites = (Sprite*)SDL_malloc(sizeof(Sprite) * nAnimationSprites);
+
+		if(sheetClips != NULL){
+			for(i = 0; i < nAnimationSprites; i++){
+				animatedSprite.animationSprites[i] = loadSprite(sheet, sheetClips[i], x, y, angle, center, flip);
+			}
+		}
+
+		animatedSprite.currentAnimationSprite = animatedSprite.animationSprites[0]; //SET CURRENT SPRITE TO FIRST AVAILABLE
+	}
+	
+	animatedSprite.x = x;
+	animatedSprite.y = y;
+	animatedSprite.velX = 0;
+	animatedSprite.velY = 0;
+
+	animatedSprite.angle = angle;
+	animatedSprite.center = center;
+	animatedSprite.flip = flip;
+	animatedSprite.frame = 0;
+
+	return animatedSprite;
+}
+
+/*DETECT COLLISION BETWEEN BOX A & B*/
+bool checkCollision(SDL_Rect a, SDL_Rect b)
+{
+	if(a.x + a.w <= b.x)
+		return false;
+	else if(a.x >= b.x + b.w)
+		return false;
+	else if(a.y + a.h <= b.y)
+		return false;
+	else if(a.y >= b.y + b.h)
+		return false;
+	else
+		return true; //COLLISION
+}
+
+/*MOVE SPRITE AND CHECK FOR COLLISIONS AGAINST spritesColliding BASED ON ITS POSITION AND VELOCITY (IF APPLICABLE)*/
+void move(Sprite* sprite, Sprite* spritesColliding, int nSpritesColliding)
+{
+	bool collision = false;
+
+	if(spritesColliding != NULL && nSpritesColliding > 0){ //CHECK FOR COLLISIONS
+		int i;
+		SDL_Rect checkCollider = sprite->boxCollider;
+
+		checkCollider.x += sprite->velX;
+		checkCollider.y += sprite->velY;
+
+		for(i = 0; i < nSpritesColliding && !collision; i++){
+			collision = checkCollision(checkCollider, spritesColliding[i].boxCollider);
+		}
+	}
+
+	if(!collision){
+		sprite->x += sprite->velX;
+		sprite->y += sprite->velY;
+
+		sprite->boxCollider.x = sprite->x;
+		sprite->boxCollider.y = sprite->y;
+	}
+}
+
+/*MOVE ANIMATED SPRITE*/
+void move(AnimatedSprite* sprite, Sprite* spritesColliding, int nSpritesColliding)
+{
+	animate(sprite);
+	move(&sprite->currentAnimationSprite, spritesColliding, nSpritesColliding);
+}
+
+/*CHANGE ANIMATED SPRITES BASED ON INTERNAL FRAME COUNT*/
+void animate(AnimatedSprite* sprite)
+{
+	int currentSpriteIndex = sprite->frame / (sprite->nAnimationSprites * 2);
+
+	if(currentSpriteIndex >= sprite->nAnimationSprites){
+		sprite->frame = 0;
+		currentSpriteIndex = sprite->nAnimationSprites - 1;
+	}
+
+	sprite->currentAnimationSprite = sprite->animationSprites[currentSpriteIndex];
+}
+
+/*DELETE GIVEN SPRITE*/
+void freeSprite(Sprite* sprite)
+{
+	/*SDL_free(sprite->renderRects);
+	sprite->renderRects = NULL;
+	sprite->currentRenderRect = NULL;
+
+	sprite->sheet = NULL;*/
+}
+
+/*PRINT SDL ERRS*/
+void print_err(const char* msg)
+{
+	printf("%s, %s\n", msg, SDL_GetError());
+}
+
+/*HANDLE PLAYER INPUT FOR PAC-MAN*/
+void hanndlePacInput()
+{
+	const Uint8 *currentKeyStates = SDL_GetKeyboardState(NULL);
+
+	if(currentKeyStates[SDL_SCANCODE_UP]){
+		pac.velY = -PAC_SPEED;
+		pac.velX = 0;
+		pac.angle = -90;
+		pac.flip = SDL_FLIP_NONE;
+	} 
+	else if(currentKeyStates[SDL_SCANCODE_DOWN]){
+		pac.velY = PAC_SPEED;
+		pac.velX = 0;
+		pac.angle = 90;
+		pac.flip = SDL_FLIP_NONE;
+	}
+	else if(currentKeyStates[SDL_SCANCODE_LEFT]){
+		pac.velX = -PAC_SPEED;
+		pac.velY = 0;
+		pac.angle = 0;
+		pac.flip = SDL_FLIP_HORIZONTAL;
+	}
+	else if(currentKeyStates[SDL_SCANCODE_RIGHT]){
+		pac.velX = PAC_SPEED;
+		pac.velY = 0;
+		pac.angle = 0;
+		pac.flip = SDL_FLIP_NONE;
+	}
+	else{
+		pac.velX = 0;
+		pac.velY = 0;
+	}
+}
+
+/*ADJUST GHOSTS'S VELOCITY FOR RANDOM MOVEMENT*/
+void randomizeGhostsVelocity()
+{
+	int i;
+
+	/*for(i = 0; i < N_GHOSTS; i++){
+		if(ghosts[i].velX >= 0 && ghosts[i].x + ghosts->currentRenderRect->w > SCREEN_WIDTH){
+			ghosts[i].velX = -PAC_SPEED;
+		}
+		else if(ghosts[i].x < 0){
+			ghosts[i].velX = PAC_SPEED;
+		}
+	}*/
+}
+
+//SET PACMAN SPRITE, VELOCITY VECTORS & COLLIDERS SET
+void setPacSprite()
+{
+	int x, y, i;
+	SDL_Rect pacClips[N_PAC_POSITIONS];
+
+	x = SHEET_INITIAL_POS_X;
+	y = SHEET_INITIAL_POS_Y;
+	pacClips[PAC_CLOSED] = {x, y, SHEET_STANDARD_SPRITE_SIZE, SHEET_STANDARD_SPRITE_SIZE};
+
+	x += SHEET_STANDARD_SPRITE_SIZE + 45;
+	pacClips[PAC_HALF_OPENED] = {x, y, SHEET_STANDARD_SPRITE_SIZE - 14, SHEET_STANDARD_SPRITE_SIZE};
+
+	x += SHEET_STANDARD_SPRITE_SIZE + 28;
+	pacClips[PAC_OPENED] = {x, y, SHEET_STANDARD_SPRITE_SIZE - 65, SHEET_STANDARD_SPRITE_SIZE};
+
+	pac = loadAnimatedSprite(N_PAC_POSITIONS, &sheet, pacClips, 0, 0, 0, NULL, SDL_FLIP_NONE);
+
+	/*pac. = (SDL_Rect**)SDL_malloc(sizeof(SDL_Rect*) * pac.nRenderRects); //Create collider per animation sprite
+
+	for(i = 0; i < pac.nRenderRects; i++){
+		pac.colliders[i] = 
+	}*/
+}

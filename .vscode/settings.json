@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "cmath": "c",
+        "*.tcc": "c",
+        "cinttypes": "c",
+        "cstdlib": "c",
+        "stdbool.h": "c",
+        "type_traits": "c"
+    }
+}
